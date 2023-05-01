@@ -1,18 +1,23 @@
-from types import SimpleNamespace
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-from gsan.layers import Conv2dBlock, Res2dBlock, Lap_Pyramid_Conv, get_nonlinearity_layer
-
+from gsan.layers import Conv2dBlock, Res2dBlock, Lap_Pyramid_Conv, get_nonlinearity_layer, AdaptiveNorm
 
 class GSAN(nn.Module):
-    sigma_init = torch.FloatTensor([[0.04020832, 0.03567401, 0.02935611],
-                                    [0.05103851, 0.04890475, 0.03961657],
-                                    [0.05615773, 0.05953120, 0.04856632],
-                                    [0.05966155, 0.06538393, 0.05243944],
-                                    [0.05236926, 0.05979212, 0.04683833],
-                                    [0.06130973, 0.07831845, 0.05987991]])
+    # Values from the max abs values
+    bypass_in_scale = torch.FloatTensor([[0.37773720, 0.35912505, 0.30737990],
+                                         [0.37801176, 0.37293965, 0.31109694],
+                                         [0.38694460, 0.38137160, 0.33248110],
+                                         [0.39483570, 0.38033080, 0.33549930],
+                                         [0.30094090, 0.32920223, 0.27291647]]).cuda()
+    bypass_in_scale = 1.0 / bypass_in_scale
+
+    bypass_out_scale = torch.FloatTensor([[0.37773720, 0.35912505, 0.30737990],
+                                          [0.37801176, 0.37293965, 0.31109694],
+                                          [0.38694460, 0.38137160, 0.33248110],
+                                          [0.39483570, 0.38033080, 0.33549930],
+                                          [0.30094090, 0.32920223, 0.27291647]]).cuda()
 
     def __init__(self, K):
         super().__init__()
@@ -22,14 +27,17 @@ class GSAN(nn.Module):
         # Style mapping network
         self.S = StyleMappingNetwork()
         # Learnable scales
-        self.V = nn.ParameterList()
+        self.V_in = []
+        self.V_out = []
         # Mask blocks
-        self.M = self.get_bp_blocks()
+        self.M_enc, self.M_dec = self.get_mask_blocks()
         # The low-level encoder/decoder
-        self.E = self.get_encoder_residual()
-        self.D = self.get_decoder_residual()
+        self.E = self.get_encoder_low()
+        self.D = self.get_decoder_low()
 
     def encode(self, x, input_level=0, training=False):
+        # Input: x_a
+        # Output: [p_a], ft_low_a, ft_mid_a and sty_a
         # Do pyramid decompose first
         if training:
             p_a, g_a = self.P.pyramid_decom(x, input_level, training)
@@ -50,106 +58,123 @@ class GSAN(nn.Module):
         return outputs
 
     def decode(self, inputs, training=False):
+        # Input: outputs_a with sty_b
+        # Output: x_b
+        # Decode style
         sty_b = inputs['sty']
+        # adain_b = self.S.decode(sty_b)
         # Projection happens within activation norm
         adain_b = sty_b[..., 0, 0]
         # Do low-level decoding
         low_b = self.cond_forward(self.D, inputs['ft'], adain_b)
-        tbn_b = torch.sigmoid(low_b[:, :3])
-        bdp_b = low_b[:, 3:]
+        tbn_b = torch.sigmoid(low_b)
         # Progressively generate the high-freq details
-        p_b = self.bp_forward(inputs['p'], bdp_b, tbn_b, adain_b)
+        p_b, ft_hf = self.mask_forward(inputs['p'], tbn_b, adain_b)
         # Pyramid reconstruction
+        g_b = self.P.pyramid_recons(p_b, True)
+        ft_a = ft_hf + [inputs['ft']]
         if training:
-            g_b = self.P.pyramid_recons(p_b, training)
-            return g_b
-        x_b = self.P.pyramid_recons(p_b)
-        return x_b
+            outputs = {
+                'x': g_b[0], 'g': g_b, 'ft': ft_a, 'p': p_b,
+            }
+            return outputs
+        return g_b[0]
 
-    def get_encoder_residual(self):
-        # Encoding half of the residual pathway
+    def get_decoder_low(self):
+        # Decoding half of low-res
+        # Input: ft_low_a and adain_b
+        # Output: tbn_b
+        # Remove style first
+        # No need for IN since AdaIN has IN
+        model = []
+        # Apply new style
+        model += [
+            AdaptiveNorm(256, 64, projection=True),
+            get_nonlinearity_layer('leakyrelu', inplace=False)
+        ]
+        model += [Res2dBlock(256, 128, padding=1,
+                             activation_norm_type='layer_2d',
+                             padding_mode='reflect', nonlinearity='leakyrelu')]
+        model += [Res2dBlock(128, 64, padding=1,
+                             activation_norm_type='layer_2d',
+                             padding_mode='reflect', nonlinearity='leakyrelu')]
+        model += [Conv2dBlock(64, 16, 3, padding=1, padding_mode='reflect',
+                              nonlinearity='leakyrelu')]
+        model += [Conv2dBlock(16, 3, 3, padding=1, padding_mode='reflect')]
+        return nn.Sequential(*model)
+
+    def get_encoder_low(self):
+        # Encoding half of mid-res
+        # Input: p_n_a and tbn_a
+        # Ouput: ft_mid_a
         model = [Conv2dBlock(3, 16, 3, padding=1,
                              padding_mode='reflect', nonlinearity='leakyrelu')]
         model += [Conv2dBlock(16, 64, 3, padding=1,
                               padding_mode='reflect', nonlinearity='leakyrelu')]
-        model += [Res2dBlock(64, 128, padding=1, padding_mode='reflect',
-                             activation_norm_type='layer_2d', nonlinearity='leakyrelu')]
-        model += [Res2dBlock(128, 256, 3, padding=1, padding_mode='reflect',
-                             activation_norm_type='layer_2d', nonlinearity='leakyrelu')]
+        model += [Res2dBlock(64, 128, padding=1,
+                             activation_norm_type='layer_2d',
+                             padding_mode='reflect', nonlinearity='leakyrelu')]
+        model += [Res2dBlock(128, 256, 3, padding=1,
+                             activation_norm_type='layer_2d',
+                             padding_mode='reflect',  nonlinearity='leakyrelu')]
+        model += [Conv2dBlock(256, 256, 3, padding=1, padding_mode='reflect')]
         return nn.Sequential(*model)
 
-    def get_decoder_residual(self):
-        # Decoding half of the residual pathway
-        model = []
-        # Apply new style
-        model += [
-            Conv2dBlock(
-                256, 256, 3,
-                padding=1, padding_mode='reflect',
-                activation_norm_type='adaptive',
-                activation_norm_params=SimpleNamespace(
-                    activation_norm_type='instance',
-                    cond_dims=64,
-                    projection=True),
-                nonlinearity='leakyrelu'
-            )]
-        model += [Res2dBlock(256, 128, padding=1, padding_mode='reflect',
-                             activation_norm_type='layer_2d', nonlinearity='leakyrelu')]
-        model += [Res2dBlock(128, 64, padding=1, padding_mode='reflect',
-                             activation_norm_type='layer_2d', nonlinearity='leakyrelu')]
-        model += [Conv2dBlock(64, 16, 3, padding=1, padding_mode='reflect',
-                              nonlinearity='leakyrelu')]
-        model += [Conv2dBlock(16, 6, 3, padding=1, padding_mode='reflect')]
-        return nn.Sequential(*model)
-
-    def get_bp_blocks(self):
-        mask_blocks = nn.ModuleList()
+    def get_mask_blocks(self):
+        mask_enc_blocks = nn.ModuleList()
+        mask_dec_blocks = nn.ModuleList()
         n_channels = 16
         for k in range(self.K):
-            mask_block = nn.Sequential(
-                Conv2dBlock(6, n_channels, 3, padding=1,
+            # Separate encoder and decoder blocks
+            mask_enc_block = nn.Sequential(
+                Conv2dBlock(3,
+                            n_channels, 3, padding=1,
+                            padding_mode='reflect', nonlinearity='leakyrelu'),
+                Conv2dBlock(n_channels, n_channels * 2, 3, padding=1,
                             padding_mode='reflect', nonlinearity='leakyrelu'),
                 Conv2dBlock(
-                    n_channels, n_channels * 2, 3,
-                    padding=1, padding_mode='reflect',
-                    activation_norm_type='adaptive',
-                    activation_norm_params=SimpleNamespace(
-                        activation_norm_type='instance',
-                        cond_dims=64,
-                        projection=True),
-                    nonlinearity='leakyrelu'
-                ),
+                    n_channels * 2, n_channels * 2, 3,
+                    padding=1, padding_mode='reflect'),
+            )
+            mask_enc_blocks.append(mask_enc_block)
+
+            mask_dec_block = nn.Sequential(
+                AdaptiveNorm(n_channels * 2, 64, projection=True),
+                get_nonlinearity_layer('leakyrelu', inplace=False),
                 Conv2dBlock(n_channels * 2, n_channels, 3, padding=1,
                             padding_mode='reflect', nonlinearity='leakyrelu'),
                 Conv2dBlock(n_channels, 3, 3, padding=1,
                             padding_mode='reflect'),
             )
-            mask_blocks.append(mask_block)
+            mask_dec_blocks.append(mask_dec_block)
             n_channels += 16
-            self.V.append(nn.Parameter(self.sigma_init[k]))
-        self.V.append(nn.Parameter(self.sigma_init[k + 1]))
-        return mask_blocks
+            self.V_in.append(self.bypass_in_scale[k])
+            self.V_out.append(self.bypass_out_scale[k])
+        return mask_enc_blocks, mask_dec_blocks
 
-    def bp_forward(self, p_a, p_b_K, tbn_b, z_s_b):
+    def mask_forward(self, p_a, tbn_b, z_s_b):
+        # Input: [p_a] and sp_mask
+        # Output: [p_b]
         p_a = p_a[:-1]
         p_b = []
-        p_b_k = p_b_K * self.V[self.K].view(1, 3, 1, 1)
+        ft = []
         # input level might be > 0
         for i in range(len(p_a)):
             k = self.K - i - 1
-            # Upsample p_b_i
-            p_b_k_up = nn.functional.interpolate(
-                p_b_k, size=(p_a[-1 - i].shape[2], p_a[-1 - i].shape[3]))
             # Do current level
-            p_a_k = p_a[-1 - i]
-            # With progressive feedback
-            p_b_k = self.cond_forward(self.M[k], torch.cat(
-                (p_a_k, p_b_k_up), dim=1), z_s_b)
-            # Apply learnable scalar
-            p_b_k = F.instance_norm(p_b_k) * self.V[k].view(1, 3, 1, 1)
+            p_a_k = p_a[-1-i]
+            p_a_k_in = p_a_k * self.V_in[k].view(1, 3, 1, 1)
+            ft_k = self.M_enc[k](p_a_k_in)
+            ft = [ft_k] + ft
+            p_b_k = self.cond_forward(self.M_dec[k], ft_k, z_s_b)
+            # Let's call this lin2 for now
+            # A custom activation function that applies higher gradient at large input
+            p_b_k = torch.where(torch.abs(p_b_k) < 1.0,
+                                p_b_k, p_b_k * 4)
+            p_b_k = p_b_k * self.V_out[k].view(1, 3, 1, 1)
             p_b = [p_b_k] + p_b
-        p_b.append(tbn_b)
-        return p_b
+        p_b = p_b + [tbn_b]
+        return p_b, ft
 
     @staticmethod
     def cond_forward(net, x, s):
@@ -159,7 +184,7 @@ class GSAN(nn.Module):
             else:
                 x = block(x)
         return x
-
+    
 
 class StyleMappingNetwork(nn.Module):
     def __init__(self):

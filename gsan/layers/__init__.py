@@ -10,6 +10,7 @@ from .residual import ResLinearBlock, Res1dBlock, Res2dBlock, Res3dBlock, \
     PartialRes2dBlock, PartialRes3dBlock
 from .laplacian import Lap_Pyramid_Conv
 from .nonlinearity import get_nonlinearity_layer
+from .activation_norm import AdaptiveNorm
 
 __all__ = ['Conv1dBlock', 'Conv2dBlock', 'Conv3dBlock', 'LinearBlock',
            'HyperConv2dBlock', 'MultiOutConv2dBlock',
@@ -18,4 +19,5 @@ __all__ = ['Conv1dBlock', 'Conv2dBlock', 'Conv3dBlock', 'LinearBlock',
            'UpRes2dBlock', 'DownRes2dBlock',
            'ResLinearBlock', 'HyperRes2dBlock', 'MultiOutRes2dBlock',
            'PartialRes2dBlock', 'PartialRes3dBlock', 'Lap_Pyramid_Conv',
+           'AdaptiveNorm',
            'get_nonlinearity_layer']
