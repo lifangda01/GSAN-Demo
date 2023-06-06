@@ -1,0 +1,149 @@
+inference_args:
+    # Samples the style code from the prior distribution or uses the style code
+    # encoded from the input images in the other domain.
+    style_mode: random
+
+# How often do you want to log the training stats.
+logging_iter: 100
+# Number of training epochs.
+max_iter: 60000
+# Whether to benchmark speed or not.
+speed_benchmark: False
+
+image_display_iter: 1000
+image_save_iter: 1000
+snapshot_save_iter: 10000
+trainer:
+    type: stainaire.trainers.gsan
+    model_average: false
+    amp: O1
+    gan_mode: least_square
+    perceptual_loss:
+        mode: vgg19
+        layers: ["relu_1_1", "relu_2_1", "relu_3_1", "relu_4_1", "relu_5_1"]
+        weights: [0.03125, 0.0625, 0.125, 0.25, 1.0]
+    recon_loss:
+        weights: [0.25, 0.25, 0.25, 0.25] # for k = 3
+        loss: 'smoothl1'
+        beta: 0.1
+    image_to_tensorboard: true
+    loss_weight:
+        gan: 1.0
+        cycle_recon: 10.0
+        idt_recon: 1.0
+        perceptual: 0.5
+        kl: 0.01
+        struct: 1.0
+        latent: 10.0
+        ms: 0.02
+    init:
+        type: kaiming
+        gain: 1
+gen_opt:
+    # fused_opt: false
+    type: adam
+    lr: 0.0001
+    adam_beta1: 0.5
+    adam_beta2: 0.999
+    lr_policy:
+        type: lambda
+        iteration_mode: true
+        n_steps: 60000 # Same as max_iter
+        n_steps_before_decay: 10000
+dis_opt:
+    # fused_opt: false
+    type: adam
+    lr: 0.0001
+    adam_beta1: 0.5
+    adam_beta2: 0.999
+    lr_policy:
+        type: lambda
+        iteration_mode: true
+        n_steps: 60000 # Same as max_iter
+        n_steps_before_decay: 10000
+gen:
+    type: stainaire.generators.gsan
+    mix_mode: random
+    arch:
+        # innermost has 256 filters
+        num_levels: 3 # 3 high-res edge maps
+        num_filters: 256
+        num_mask_channels: 16
+        alpha: 4
+        beta: 1.0
+        activation_norm_type: layer_2d
+    smn:
+        in_channels: 256
+        inner_channels: 128
+        num_filters: 64
+        out_channels: 128
+        nonlinearity: leakyrelu # symmetric
+        use_vae: true
+
+dis:
+    type: stainaire.discriminators.gsan
+    patch_wise: True
+    num_filters: 16
+    max_num_filters: 256
+    num_layers: 4
+    num_discriminators: 4 # 40x 20x 10x 5x
+    activation_norm_type: layer_2d
+    weight_norm_type: none
+
+# Data options.
+data:
+    # Name of this dataset.
+    name: tcga
+    # Which dataloader to use?
+    type: stainaire.datasets.unpaired_images
+    paired: false
+    # How many data loading workers per GPU?
+    num_workers: 12
+    input_types:
+        - images:
+              # If not specified, is None by default.
+              ext: png
+              # If not specified, is None by default.
+              num_channels: 3
+              # If not specified, is None by default.
+              interpolator: BILINEAR
+              # If not specified, is False by default.
+              normalize: false
+
+    # Train dataset details.
+    train:
+        # Input LMDBs.
+        # is_lmdb: false
+        roots:
+            - /media/fangda/FDL2/tcga_lmdb_40x_512/
+        # Batch size per GPU.
+        batch_size: 12
+        # Data augmentations to be performed in given order.
+        augmentations:
+            # Geometric
+            # random_crop_h_w: 256, 256
+            horizontal_flip: true
+            vertical_flip: true
+            random_rotate_90: true
+            # elastic_transform: 30, 10
+            # Color
+            random_brightness_contrast: 0.1, 0.1
+            hue_saturation_value: 20, 20, 0
+            # gaussian_blur: 2
+            # gauss_noise: 0.1
+            random_upscale: 1.1
+            random_crop_h_w: 384, 384
+    # Val dataset details.
+    # Not used in GSAN
+    val:
+        # Input LMDBs.
+        roots:
+            - /media/fangda/FDL2/tcga_lmdb_40x_512/
+        # Batch size per GPU.
+        batch_size: 10
+        # If resize_h_w is not given, then it is assumed to be same as crop_h_w.
+        augmentations:
+            random_crop_h_w: 512, 512
+            horizontal_flip: true
+            vertical_flip: true
+            random_rotate_90: true

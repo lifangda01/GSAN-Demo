@@ -1,0 +1,14 @@
+
+dependencies:
+  - opencv
+  - scikit-learn
+  - tensorboard
+  - pyyaml
+  - pynvml
+  - packaging
+  - albumentations
+  - python-lmdb
+  - tqdm
+  - matplotlib
+  - attrdict
+  - numba
