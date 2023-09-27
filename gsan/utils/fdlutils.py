@@ -11,7 +11,7 @@ import matplotlib as mpl
 
 def quick_imshow(nrows, ncols=1, images=None, titles=None, colorbar=True, colormap='jet',
                  vmax=None, vmin=None, figsize=None, figtitle=None, visibleaxis=True,
-                 saveas='/home/ubuntu/tempimshow.png', tight=False, dpi=250.0):
+                 saveas='', tight=False, dpi=250.0):
     """-------------------------------------------------------------------------
     Desc.:      convenience function that make subplots of imshow
     Args.:      nrows - number of rows
