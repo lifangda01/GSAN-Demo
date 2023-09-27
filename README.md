@@ -19,3 +19,4 @@ See `demo.ipynb` for concise examples using the pre-trained G-SAN.
 
 ## Implementation
 This repo is built upon [Imaginaire](https://github.com/NVlabs/imaginaire) from NVIDIA.
+For the full training code, please see the `training` branch.
